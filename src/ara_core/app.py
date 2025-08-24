@@ -143,11 +143,23 @@ class App:
 
 
     # ============ Dependency Management ============
-    def add_module(self, module):
+    def add_module(self, module, auto_init=True):
+        """Register a module
         
-        """Register a module (with DEPENDENCIES)"""
+        Args:
+            module (Module): Module instance or class.
+            auto_init (bool): Whether to initialize the module automatically.
+        """
+        
         if inspect.isclass(module):
             module = module(self)
+            
+        if auto_init:
+            try:
+                module.init()
+            except Exception as e:
+                self.log.error(f"Failed to initialize module {module.NAME}: {e}")
+                raise ModuleInitError(f"Failed to initialize module {module.NAME}: {e}")
             
         name = module.NAME
         self.modules[name] = module
