@@ -1,7 +1,10 @@
-class AppError(Exception):
+class DependencyError(Exception):
     pass
 
-class FrameUIError(AppError):
+class CycleError(DependencyError):
+    pass
+
+class AppError(Exception):
     pass
 
 class CallbackError(AppError):
@@ -14,15 +17,6 @@ class ModuleError(AppError):
     pass
 
 class ModuleInitError(ModuleError):
-    pass
-
-class ModuleInputError(ModuleError):
-    pass
-
-class ModuleRenderError(ModuleError):
-    pass
-
-class ModuleUpdateError(ModuleError):
     pass
 
 class ModuleTerminateError(ModuleError):

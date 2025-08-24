@@ -1,14 +1,14 @@
 import inspect
 import glfw
+from collections import defaultdict, deque
 from .exceptions import *
 from ara_log import Log
 
 
 class App:
-    """Ara application core.
-    
-    Handles window creation, input processing, module management, and main loop execution.
-    """
+    """Ara application core with dependency-based callback scheduling."""
+
+    NAME = "core"
 
     _KEYS_CODES = {
         # Letters
@@ -101,27 +101,34 @@ class App:
         self.log.info("Initializing Ara.Core")
 
         if not glfw.init():
-            self._fail("Failed to initialize GLFW")
+            self.log.error("Failed to initialize GLFW")
+            raise AppError("Failed to initialize GLFW")
 
         self.title, self.width, self.height = title, width, height
         self.window = glfw.create_window(width, height, title, None, None)
         if not self.window:
             glfw.terminate()
-            self._fail("Failed to create GLFW window")
+            self.log.error("Failed to create GLFW window")
+            raise AppError("Failed to create GLFW window")
 
         glfw.make_context_current(self.window)
         glfw.swap_interval(1)
 
-        self._modules = []
-        self._modules_added = set()
-        
+        # --- modules and callbacks ---
+        self.modules = {}        # name -> instance
+        self.callbacks = {}      # full_name -> function
+        self.deps = defaultdict(set)
+        self.DEPENDENCIES = {}      # for core’s own callbacks
+
+        # --- timing ---
         self._start_time = glfw.get_time()
         self._last_frame_time = self._start_time
         self._delta_time = 0.0
         self._framerate = []
         self._avg_framerate = 0.0
         self._fps = 0.0
-        
+
+        # --- Input callbacks ---
         self._keys, self._keys_prev = {}, {}
         self._mouse_buttons, self._mouse_buttons_prev = {}, {}
         self._mouse_pos, self._mouse_delta = (0, 0), (0, 0)
@@ -133,16 +140,142 @@ class App:
         glfw.set_scroll_callback(self.window, self._scroll_callback)
 
         self.log.info("Ara.Core initialized successfully!")
+
+
+    # ============ Dependency Management ============
+    def add_module(self, module):
         
-    
+        """Register a module (with DEPENDENCIES)"""
+        if inspect.isclass(module):
+            module = module(self)
+            
+        name = module.NAME
+        self.modules[name] = module
+
+        for func_name, rules in module.DEPENDENCIES.items():
+            if not hasattr(module, func_name):
+                raise DependencyError(f"Module {name} has no function {func_name}, but it is listed in DEPENDENCIES")
+            full_name = f"{name}.{func_name}"
+            self.callbacks[full_name] = getattr(module, func_name)
+
+
+    def add_callback(self, func_name, func, before=None, after=None):
+        """Register a core-owned callback"""
+        full_name = f"{self.NAME}.{func_name}"
+        self.callbacks[full_name] = func
+        self.DEPENDENCIES[func_name] = {"before": before or [], "after": after or []}
+
+
+    def build_dependencies(self):
+        """Build dependency graph after all modules and core callbacks are added"""
+        # modules
+        for modname, module in self.modules.items():
+            for func_name, rules in module.DEPENDENCIES.items():
+                full_name = f"{modname}.{func_name}"
+                for dep in rules.get("after", []):
+                    self._add_dependency(dep, full_name)
+                for dep in rules.get("before", []):
+                    self._add_dependency(full_name, dep)
+
+        # core callbacks
+        for func_name, rules in self.DEPENDENCIES.items():
+            full_name = f"{self.NAME}.{func_name}"
+            for dep in rules.get("after", []):
+                self._add_dependency(dep, full_name)
+            for dep in rules.get("before", []):
+                self._add_dependency(full_name, dep)
+
+
+    def _add_dependency(self, src, dst):
+        """Add edge src -> dst, supporting module.*"""
+        def expand(name):
+            if ".*" in name:
+                mod = name.split(".")[0]
+                if mod not in self.modules and mod != self.NAME:
+                    return []
+                return [cb for cb in self.callbacks if cb.startswith(mod + ".")]
+            else:
+                return [name]
+
+        for expanded_src in expand(src):
+            for expanded_dst in expand(dst):
+                src_mod = expanded_src.split(".")[0]
+                dst_mod = expanded_dst.split(".")[0]
+
+                if (src_mod not in self.modules and src_mod != self.NAME) or \
+                   (dst_mod not in self.modules and dst_mod != self.NAME):
+                    continue
+
+                if expanded_src not in self.callbacks:
+                    raise DependencyError(f"No function {expanded_src}")
+                if expanded_dst not in self.callbacks:
+                    raise DependencyError(f"No function {expanded_dst}")
+
+                self.deps[expanded_src].add(expanded_dst)
+
+
+    def topological_sort(self):
+        """Kahn’s algorithm with cycle detection"""
+        indeg = defaultdict(int)
+        for u in self.callbacks:
+            indeg[u] = 0
+        for u in self.deps:
+            for v in self.deps[u]:
+                indeg[v] += 1
+
+        q = deque([u for u in self.callbacks if indeg[u] == 0])
+        order = []
+
+        while q:
+            u = q.popleft()
+            order.append(u)
+            for v in self.deps[u]:
+                indeg[v] -= 1
+                if indeg[v] == 0:
+                    q.append(v)
+
+        if len(order) != len(self.callbacks):
+            cycle = self._find_cycle()
+            raise CycleError("Dependency cycle detected: " + " -> ".join(cycle))
+
+        return order
+
+
+    def _find_cycle(self):
+        """DFS to find cycle"""
+        visited = {}
+        stack = []
+
+        def dfs(u):
+            visited[u] = "gray"
+            stack.append(u)
+            for v in self.deps[u]:
+                if visited.get(v) == "gray":
+                    return stack[stack.index(v):] + [v]
+                if visited.get(v) is None:
+                    cycle = dfs(v)
+                    if cycle:
+                        return cycle
+            stack.pop()
+            visited[u] = "black"
+            return None
+
+        for u in self.callbacks:
+            if visited.get(u) is None:
+                cycle = dfs(u)
+                if cycle:
+                    return cycle
+        return []
+
+
+    # ============ Input API ============
     def _update_input(self):
         """Update input states for the current frame."""
         self._keys_prev = self._keys.copy()
         self._mouse_buttons_prev = self._mouse_buttons.copy()
         self._mouse_delta, self._mouse_scroll = (0, 0), 0
-
-    
-    # ----------------- Callbacks -----------------
+        
+        
     def _key_callback(self, window, key, scancode, action, mods):
         """GLFW key callback handler."""
         if action == glfw.PRESS:
@@ -172,49 +305,8 @@ class App:
     def _scroll_callback(self, window, xpos, ypos):
         """GLFW scroll callback handler."""
         self._mouse_scroll = ypos
-
-
-    # ----------------- Modules -----------------
-    def add_module(self, module, auto_init=True, auto_register=True, allow_duplicate=False):
-        """Add a module to the application.
         
-        Args:
-            module: Module class or instance to add.
-            auto_init (bool): Whether to automatically initialize the module.
-            auto_register (bool): Whether to automatically register the module.
-            allow_duplicate (bool): Whether to allow duplicate modules.
-            
-        Returns:
-            Module: The added module instance.
-        """
-        
-        # Check if module is a class or instance
-        if inspect.isclass(module):
-            module = module(self)
     
-        module_name = type(module).__name__
-        
-        # Initialize module
-        if auto_init:
-            try:
-                module.init()
-            except Exception as e:
-                self.log.error(f"Error initializing module {module_name}: {e}")
-                raise ModuleInitError(str(e))
-        
-        # Registering module
-        if auto_register:
-            if not allow_duplicate and (type(module) in self._modules_added):
-                self.log.warning(f"Module {module_name} already added")
-                raise ModuleError(f"Module {module_name} already added")
-            
-            self._modules.append(module)
-            self._modules_added.add(type(module))
-            
-        return module
-    
-
-    # ----------------- Input API -----------------
     def key_pressed(self, key):
         """Check if a key is currently pressed.
         
@@ -362,13 +454,15 @@ class App:
         self._mouse_locked = lock
         glfw.set_input_mode(self.window, glfw.CURSOR,
             glfw.CURSOR_DISABLED if self._mouse_locked else glfw.CURSOR_NORMAL)
-
-    # ----------------- Utilities -----------------
+        
+    
+    # ============ Utilities API ===========
     def close(self):
         """Close the application window."""
         glfw.set_window_should_close(self.window, True)
-
-
+    
+    
+    # ============ Runtime API ============
     def time(self):
         """Get the current time in seconds since the start of the application."""
         return glfw.get_time() - self._start_time
@@ -377,13 +471,13 @@ class App:
     def dt(self):
         """Get the time delta since the last frame."""
         return self._delta_time
-    
+
 
     def fps(self):
         """Get the average FPS."""
         return self._fps
 
-    
+
     def _update_framerate(self):
         self._framerate.append(self._delta_time)
         
@@ -397,19 +491,39 @@ class App:
         else:
             self._fps = 9999.0
 
-    # ----------------- Main Loop -----------------
-    def run(self, frame_ui=None, callback=None, terminate=None):
-        """Run the main application loop.
+
+    # ============ Main Loop ============
+    def run(self, render=None, update=None, terminate=None):
+        """Run main loop with dependency-resolved callbacks
         
         Args:
-            frame_ui: Optional UI rendering callback.
-            callback: Optional per-frame callback.
-            terminate: Optional cleanup callback.
+            render (function, optional): Render callback. Defaults to None.
+            update (function, optional): Update callback. Defaults to None.
+            terminate (function, optional): Terminate callback. Defaults to None.
         """
         
+        # Adding default callbacks
+        if render is None:
+            render = lambda: None
+            
+        if update is None:
+            update = lambda: None
+            
+        self.add_callback("render", render, after="core.update")
+        self.add_callback("update", update)
+        
+        # Building dependencies
+        self.log.info("Building dependencies...")
+        
+        self.build_dependencies()
+        order = self.topological_sort()
+        
+        # Main loop
         self.log.info("Main loop started!")
+        
         try:
             while not glfw.window_should_close(self.window):
+                # Runtime updating
                 current_time = self.time()
                 self._delta_time = max(current_time - self._last_frame_time, 0.0)
                 self._last_frame_time = current_time
@@ -419,82 +533,30 @@ class App:
                 # Events and input
                 self._update_input()
                 glfw.poll_events()
-                
-                for module in self._modules:
+
+                # Callbacks
+                for name in order:
+                    callback = self.callbacks[name]
+                    
                     try:
-                        if hasattr(module, "process_input"):
-                            module.process_input()
+                        callback()
                             
                     except Exception as e:
-                        self.log.error(f"Module {type(module).__name__} processing input error: {e}")
-                        raise ModuleInputError(str(e))
+                        self.log.error(f"Error in callback {name}: {e}")
+                        raise CallbackError(f"Error in callback {name}: {e}")
 
-
-                # Render
-                self.width, self.height = glfw.get_framebuffer_size(self.window)
-                
-                try:
-                    if frame_ui:
-                        if len(inspect.signature(frame_ui).parameters) == 0:
-                            frame_ui()
-                        else:
-                            frame_ui(self)
-                            
-                except Exception as e:
-                    self.log.error(f"Frame UI error: {e}")
-                    raise FrameUIError(str(e))
-                
-                
-                for module in self._modules:
-                    try:
-                        if hasattr(module, "render"):
-                            module.render()
-                        
-                    except Exception as e:
-                        self.log.error(f"Module {type(module).__name__} render error: {e}")
-                        raise ModuleRenderError(str(e))
-                
-                
-                # Callback
-                try:
-                    if callback:
-                        if len(inspect.signature(callback).parameters) == 0:
-                            callback()
-                        else:
-                            callback(self)
-                            
-                except Exception as e:
-                    self.log.error(f"Callback error: {e}")
-                    raise CallbackError(str(e))
-                
-                
-                for module in self._modules:
-                    try:
-                        if hasattr(module, "update"):
-                            module.update()
-
-                    except Exception as e:
-                        self.log.error(f"Module {type(module).__name__} update error: {e}")
-                        raise ModuleUpdateError(str(e))
-                
-                # Swap buffers
                 glfw.swap_buffers(self.window)
-        
-        
-        # Terminate
+
         finally:
             try:
                 if terminate:
-                    if len(inspect.signature(terminate).parameters) == 0:
-                        terminate()
-                    else:
-                        terminate(self)
+                    terminate()
                         
             except Exception as e:
                 self.log.error(f"Terminate error: {e}")
                 
-            
-            for module in self._modules:
+
+            for module in self.modules.values():
                 try:
                     if hasattr(module, "terminate"):
                         module.terminate()

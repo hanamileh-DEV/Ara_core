@@ -15,17 +15,13 @@ pressed, down, and up queries for keys and mouse buttons
 
 Cursor locking, movement delta, and scroll tracking
 
-
-Module System – Plug in custom modules with lifecycle methods:
-
-init(), process_input(), render(), update(), terminate()
-
+Module System – Plug in custom modules with lifecycle methods
 
 Timing Utilities – Frame delta (dt), elapsed time, and FPS measurement.
 
 Logging – Integrated logging system with configurable levels.
 
-Callbacks – Flexible frame_ui, callback, and terminate hooks in the main loop.
+Callbacks – Flexible callback hooks in the main loop.
 
 
 ---
@@ -35,32 +31,32 @@ Quick Start
 from ara_core import App
 
 # Create application instance
-app = App(title="My First App", width=1280, height=720, log_level="info")
+core = App(title="My First App", width=1280, height=720, log_level="info")
 
-def frame_ui(app):
-    print("UI frame")
+def render(core):
+    print("GUI rendering")
 
-def callback(app):
-    print(f"Frame time: {app.dt()}")
+def update(core):
+    print(f"Frame time: {core.dt()}")
 
-def terminate(app):
+def terminate(core):
     print("Cleanup done!")
 
 # Run with custom callbacks
-app.run(frame_ui, callback, terminate)
+core.run(render, callback, terminate)
 ```
 ---
 
 Input API
 ```py
-app.key_pressed("w")      # True while 'W' is held
-app.key_down("space")     # True only on the frame space was pressed
-app.key_up("escape")      # True only on the frame escape was released
+core.key_pressed("w")      # True while 'W' is held
+core.key_down("space")     # True only on the frame space was pressed
+core.key_up("escape")      # True only on the frame escape was released
 
-app.mouse_button_pressed("left")
-pos = app.get_mouse_pos()
-dx, dy = app.get_mouse_delta()
-scroll = app.get_mouse_scroll()
+core.mouse_button_pressed("left")
+pos = core.get_mouse_pos()
+dx, dy = core.get_mouse_delta()
+scroll = core.get_mouse_scroll()
 ```
 
 ---
@@ -71,14 +67,36 @@ Modules can be classes or instances.
 They may implement any of the lifecycle methods:
 ```py
 class ExampleModule:
-    def __init__(self, app): self.app = app
-    def init(self): print("Module initialized")
-    def process_input(self): pass
-    def render(self): pass
-    def update(self): pass
-    def terminate(self): print("Module terminated")
+    NAME = "module_example"
 
-app.add_module(ExampleModule)
+    DEPENDENCIES = {
+        "update_callback": {
+            "before": ["core.update"],
+            "after": ["module_example.other_callback"]
+        },
+
+        "other_callback": {
+            "before": [],
+            "after": []
+        }
+    }
+
+    def __init__(self, core):
+        self.core = core
+
+    def init(self):
+        print("Module initialized")
+
+    def update_callback(self):
+        print("Module updated")
+
+    def other_callback(self):
+        print("Module other callback")
+
+    def terminate(self):
+        print("Module terminated")
+
+core.add_module(ExampleModule)
 ```
 
 ---
